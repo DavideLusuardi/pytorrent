@@ -1,2 +1,8 @@
 bencode.py
 requests
+struct
+socket
+threading
+bitstring
+hashlib
+logging

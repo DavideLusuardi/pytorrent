@@ -135,6 +135,7 @@ class FileManager:
             if self.is_valid_piece(piece_index, piece):
                 self.downloaded_pieces.add(piece_index)
                 self.save_piece(piece_index, piece)
+                logger.info(f'piece downloaded {piece_index}')
                 if len(self.downloaded_pieces) == self.num_pieces:
                     logger.info(f'download complete')
                     self.finalize_download()

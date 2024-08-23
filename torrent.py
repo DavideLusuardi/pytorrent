@@ -4,6 +4,7 @@ import time
 import os
 import sys
 import logging
+
 from tracker import Tracker, TrackerManager
 from peer import PeerManager
 from filemanager import FileManager
@@ -36,7 +37,7 @@ class Torrent:
 
         self.info_hash = hashlib.sha1(
             bencodepy.encode(self.metainfo[b'info'])).digest()
-        logger.debug(self.info_hash)
+        logger.debug(f'info hash:{self.info_hash}')
 
         pieces = self.metainfo[b'info'][b'pieces']
         assert len(pieces) % 20 == 0, 'malformed pieces field'
@@ -44,7 +45,7 @@ class Torrent:
         self.hashes = []
         for i in range(num_pieces):
             self.hashes.append(pieces[i*20:(i+1)*20])
-        logger.debug(self.hashes)
+        # logger.debug(self.hashes)
 
         self.file_manager = FileManager(
             self.metainfo[b'info'][b'name'].decode(), 'tmp', self.metainfo[b'info'][b'length'], self.metainfo[b'info'][b'piece length'], self.hashes)
@@ -67,12 +68,13 @@ class Torrent:
 
         self.tracker_manager.query_trackers()
         time.sleep(1)
-        self.peer_manager.download(max_active_peers=2)
+        self.peer_manager.download(max_active_peers=20)
 
         try:
             while True:
                 time.sleep(10)
         except KeyboardInterrupt:
+            self.tracker_manager.stop()
             self.peer_manager.stop()
 
     def __str__(self):

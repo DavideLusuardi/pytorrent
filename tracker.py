@@ -3,7 +3,6 @@ import requests
 import struct
 import socket
 import threading
-import time
 import logging
 
 from peer import Peer, PeerManager
@@ -123,9 +122,8 @@ class Tracker(threading.Thread):
     def update(self):
         ''' regular update '''
 
+        self._stop_event.wait(timeout=self.interval)
         while not self.is_stopped():
-            time.sleep(self.interval)
-
             params = {
                 'info_hash': self.info_hash,
                 'peer_id': self.peer_id,
@@ -145,6 +143,8 @@ class Tracker(threading.Thread):
             peers = self.send_request(params)
             self.peer_manager.update_peers(peers)
 
+            self._stop_event.wait(timeout=self.interval)
+
     def stop(self):
         logger.debug(f'{self.tracker_url}:stop received')
         self._stop_event.set()
@@ -155,6 +155,8 @@ class Tracker(threading.Thread):
     def run(self):
         ''' run the thread '''
 
+        self._stop_event.clear()
+        logger.info(f'{self.tracker_url}:querying tracker')
         self.query()
         self.update()
 
@@ -165,11 +167,19 @@ class TrackerManager:
         self.peer_manager: PeerManager = peer_manager
 
     def query_trackers(self) -> None:
-        # peers = []
-        # for tracker in self.trackers:
-        #     peers += tracker.query()
-
-        # self.peer_manager.update_peers(peers)
-
         # TODO: fix
-        self.trackers[0].start()
+        self.trackers = [self.trackers[0]]
+
+        for tracker in self.trackers:
+            tracker.start()
+
+    def stop(self):
+        logger.info('stop all trackers')
+
+        for tracker in self.trackers:
+            tracker.stop()
+        for tracker in self.trackers:
+            # tracker.join(timeout=1)
+            tracker.join()
+
+        logger.info('all trackers closed')

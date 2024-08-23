@@ -1,5 +1,4 @@
 import socket
-import time
 import threading
 import bencodepy
 import math
@@ -73,7 +72,11 @@ class Peer(threading.Thread):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setblocking(1)
         # self.socket.bind(('0.0.0.0', Peer.BINDING_PORT))  # TODO
+        # self.socket.listen()
+        self.socket.settimeout(4)
         self.socket.connect((self.ip, self.port))
+        logger.debug(f'{self.id}:connected to peer')
+        self.socket.settimeout(None)
         self.socket.sendall(payload)
 
         p_pstrlen = int.from_bytes(self.receive_data(1), 'big')
@@ -231,7 +234,12 @@ class Peer(threading.Thread):
         ''' receive msg loop '''
 
         while not self.is_stopped():
-            data = self.receive_data(4)
+            try:
+                data = self.receive_data(4)
+            except:
+                if not self.is_stopped():
+                    logger.exception(f'{self.id}:error occured')
+                break
 
             len_prefix = int.from_bytes(data, 'big')
             logger.debug(f'{self.id}:recv:len_prefix:{len_prefix}')
@@ -240,7 +248,13 @@ class Peer(threading.Thread):
                 logger.debug(f'{self.id}:recv:keep-alive')
                 continue
 
-            data = self.receive_data(len_prefix)
+            try:
+                data = self.receive_data(len_prefix)
+            except:
+                if not self.is_stopped():
+                    logger.exception(f'{self.id}:error occured')
+                break
+
             message_id = int.from_bytes(data[:1], 'big')
             logger.debug(f'{self.id}:recv:message_id:{message_id}')
             assert message_id in Peer.MESSAGES, 'unknown message received'
@@ -283,10 +297,9 @@ class Peer(threading.Thread):
                 for piece_index, b in enumerate(binary_bitfield):
                     if b == '1':
                         self.available_pieces.append(piece_index)
-                random.shuffle(self.available_pieces)  # TODO
-
                 logger.debug(
                     f'{self.id}:recv:available pieces:{self.available_pieces}')
+                random.shuffle(self.available_pieces)  # TODO
 
             elif message_id == 6:
                 # request msg
@@ -341,8 +354,8 @@ class Peer(threading.Thread):
                     logger.debug(
                         f'{self.id}:recv:{Peer.MESSAGES[message_id]}:{bencodepy.decode(data[2:])}')
 
-        logger.debug(f'{self.id}:receive_msg:close_connection')
-        self.close_connection()
+        logger.debug(f'{self.id}:receive_msg:close')
+        self.stop()
 
     def next_piece_index(self):
         ''' return the next piece index to request '''
@@ -360,13 +373,14 @@ class Peer(threading.Thread):
         piece_length = self.file_manager.piece_length(piece_index)
         block_index = 0
         begin = 0
-        while begin < piece_length:
+        while begin < piece_length and not self.is_stopped():
             block_length = min(
                 self.file_manager.block_length, piece_length - begin)
             self.send_request(piece_index, begin, block_length)
             block_index += 1
             begin += block_length
-            time.sleep(0.1)  # TODO
+
+            self._stop_event.wait(timeout=0.1)
 
     def download(self):
         ''' download loop '''
@@ -374,38 +388,58 @@ class Peer(threading.Thread):
         while not self.is_stopped():
             piece_index = self.next_piece_index()
             if piece_index is None:
-                time.sleep(1)  # TODO: use semaphores
+                self._stop_event.wait(timeout=1)
                 continue
 
             if self.num_requests > self.num_received + 10:
-                time.sleep(1)
+                # time.sleep(1)
+                # self._stop_event.wait(timeout=1)
                 self.num_requests = 0
                 self.num_received = 0
 
             logger.info(f"{self.id}:dowload piece \'{piece_index}\'")
-            self.download_piece(piece_index)
+            try:
+                self.download_piece(piece_index)
+            except:
+                if not self.is_stopped():
+                    logger.exception(f'{self.id}:error occured')
+                break
 
-        logger.debug(f'{self.id}:download:close_connection')
-        self.close_connection()
-
-    def close_connection(self):
-        # self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
+        logger.debug(f'{self.id}:download:close')
+        self.stop()
 
     def stop(self):
-        logger.debug(f'{self.id}:stop received')
-        self._stop_event.set()
+        if not self.is_stopped():
+            logger.debug(f'{self.id}:stop received')
+            self._stop_event.set()
+            try:
+                self.socket.shutdown(socket.SHUT_RD)
+            except:
+                pass
+
+            try:
+                self.socket.shutdown(socket.SHUT_WR)
+            except:
+                pass
 
     def is_stopped(self):
         return self._stop_event.is_set()
 
     def run(self):
-        self.handshake_peer()
-        self.send_extension_protocol_handshake()
-        self.send_bitfield()
-        self.send_unchoke()
-        self.send_interested()
-        # self.send_all_have_pieces()
+        self._stop_event.clear()
+
+        try:
+            self.handshake_peer()
+            self.send_extension_protocol_handshake()
+            self.send_bitfield()
+            self.send_unchoke()
+            self.send_interested()
+            # self.send_all_have_pieces()
+        except:
+            if not self.is_stopped():
+                logger.exception(f'{self.id}:error occured')
+            self.stop()
+            return
 
         t1 = threading.Thread(target=self.receive_msg)
         t2 = threading.Thread(target=self.download)
@@ -432,6 +466,7 @@ class PeerManager:
         for p in peers:
             if p.id not in self.peers:
                 self.peers[p.id] = p
+                logger.info(f'new peer:{p.id}')
                 if self.downloading:
                     self.activate_peer_if_needed(p)
 
@@ -440,6 +475,7 @@ class PeerManager:
 
         if len(self.active_peers) < self.max_active_peers:
             logger.info(f"activate peer {peer.id}")
+            # TODO: add and start in mutex
             self.active_peers.add(peer.id)
             peer.start()
             return True
@@ -454,26 +490,19 @@ class PeerManager:
             if not self.activate_peer_if_needed(p):
                 break
 
-        # TODO: deactivate peers
-
-        # try:
-        #     for p in self.peers[:max_active_peers]:
-        #         p.start()
-        #     for p in self.peers[:max_active_peers]:
-        #         p.join()
-        # except KeyboardInterrupt:
-        #     for p in self.peers[:max_active_peers]:
-        #         p.stop()
-        #         # p.close_connection()
-        #     for p in self.peers[:max_active_peers]:
-        #         p.join()
-
     def stop(self):
         logger.info('stop all peers')
 
         for peer_id in self.active_peers:
             p = self.peers[peer_id]
             p.stop()
+
+        for peer_id in self.active_peers:
+            p = self.peers[peer_id]
+            # p.join(timeout=1)
             p.join()
+
         self.active_peers = set()
         self.downloading = False
+
+        logger.info('all peers closed')
