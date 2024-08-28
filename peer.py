@@ -5,7 +5,11 @@ import math
 import random
 import logging
 from bitstring import BitArray
+import time
+from typing import Tuple
 
+from queueLL import Queue
+import utils
 from filemanager import FileManager
 
 logger = logging.getLogger(__name__)
@@ -29,7 +33,6 @@ class Peer(threading.Thread):
 
     def __init__(self, ip, port, peer_id, peer_manager, file_manager, info_hash, client_id) -> None:
         threading.Thread.__init__(self)
-        self._stop_event = threading.Event()
 
         self.ip: str = ip
         self.port: int = port
@@ -40,6 +43,9 @@ class Peer(threading.Thread):
         self.info_hash: bytes = info_hash
         self.client_id: bytes = client_id
 
+        self.init_vars()
+
+    def init_vars(self):
         self.am_choking = True
         self.am_interested = False
         self.peer_choking = True
@@ -48,17 +54,50 @@ class Peer(threading.Thread):
         self.socket: socket.socket = None
         self.available_pieces: list[int] = []
         self.idx_next_piece: int = 0
-        self.num_requests: int = 0
-        self.num_received: int = 0
+        self.queue: Queue[int, int] = Queue()
+        self.queue_len: int = 10
 
-    def receive_data(self, data_len):
+        self.start_time: int = 0
+        self.downloaded_blocks: list[int] = []
+        self.request_pieces: int = 0
+
+        self._stop_event = threading.Event()
+
+    @property
+    def speed(self) -> int:
+        ''' return the speed [bytes/s] '''
+
+        time_interval = 10
+        i = len(self.downloaded_blocks) - 1
+        download = 0
+        while i >= 0:
+            piece_index, downloaded_bytes, t = self.downloaded_blocks[i]
+            if time.time() - t < time_interval:
+                download += downloaded_bytes
+            else:
+                break
+            i -= 1
+
+        return download/time_interval
+
+    @property
+    def avg_speed(self) -> int:
+        ''' return the average speed [bytes/s] '''
+
+        return len(self.downloaded_blocks)*self.file_manager.block_length / (time.time()-self.start_time)
+
+    def update_stats(self, piece_index: int, downloaded_bytes: int):
+        self.downloaded_blocks.append(
+            (piece_index, downloaded_bytes, time.time()))
+
+    def receive_data(self, data_len: int) -> bytes:
         data = self.socket.recv(data_len)
         while len(data) < data_len:
             data += self.socket.recv(data_len - len(data))
         assert len(data) == data_len
         return data
 
-    def handshake_peer(self):
+    def handshake_peer(self) -> None:
         logger.debug(f'{self.id}:handshaking')
 
         pstr = b'BitTorrent protocol'
@@ -100,14 +139,14 @@ class Peer(threading.Thread):
         logger.debug(f'{self.id}:handshake recv:info_hash:{p_info_hash}')
         logger.debug(f'{self.id}:handshake recv:peer_id:{p_peer_id}')
 
-    def send_keepalive(self):
+    def send_keepalive(self) -> None:
         ''' keep-alive msg '''
 
         logger.debug(f'{self.id}:send:keep-alive')
         len_prefix = (0).to_bytes(4, 'big')
         self.socket.sendall(len_prefix)
 
-    def send_choke(self):
+    def send_choke(self) -> None:
         ''' choke msg '''
 
         logger.debug(f'{self.id}:send:choke')
@@ -117,7 +156,7 @@ class Peer(threading.Thread):
 
         self.am_choking = True
 
-    def send_unchoke(self):
+    def send_unchoke(self) -> None:
         ''' unchoke msg '''
 
         logger.debug(f'{self.id}:send:unchoke')
@@ -127,7 +166,7 @@ class Peer(threading.Thread):
 
         self.am_choking = False
 
-    def send_interested(self):
+    def send_interested(self) -> None:
         ''' interested msg '''
 
         logger.debug(f'{self.id}:send:interested')
@@ -137,7 +176,7 @@ class Peer(threading.Thread):
 
         self.am_interested = True
 
-    def send_not_interested(self):
+    def send_not_interested(self) -> None:
         ''' not interested msg '''
 
         logger.debug(f'{self.id}:send:not interested')
@@ -147,7 +186,7 @@ class Peer(threading.Thread):
 
         self.am_interested = False
 
-    def send_have(self, piece_index: int):
+    def send_have(self, piece_index: int) -> None:
         ''' have msg '''
 
         logger.debug(f'{self.id}:send:have:{piece_index}')
@@ -156,7 +195,7 @@ class Peer(threading.Thread):
         payload = (piece_index).to_bytes(4, 'big')
         self.socket.sendall(len_prefix + message_id + payload)
 
-    def send_bitfield(self):
+    def send_bitfield(self) -> None:
         ''' bitfield msg '''
 
         logger.debug(f'{self.id}:send:bitfield')
@@ -165,7 +204,7 @@ class Peer(threading.Thread):
         message_id = (5).to_bytes(1, 'big')
         self.socket.sendall(len_prefix + message_id + bitfield)
 
-    def send_request(self, piece_index: int, begin: int, length: int):
+    def send_request(self, piece_index: int, begin: int, length: int) -> None:
         ''' request msg '''
 
         logger.debug(f'{self.id}:send:request:{piece_index}:{begin}')
@@ -175,9 +214,9 @@ class Peer(threading.Thread):
             (begin).to_bytes(4, 'big') + (length).to_bytes(4, 'big')
         self.socket.sendall(len_prefix + message_id + payload)
 
-        self.num_requests += 1
+        self.request_pieces += 1
 
-    def send_piece(self, piece_index: int, begin: int, block: bytes):
+    def send_piece(self, piece_index: int, begin: int, block: bytes) -> None:
         ''' piece msg '''
 
         logger.debug(f'{self.id}:send:piece:{piece_index}')
@@ -188,7 +227,7 @@ class Peer(threading.Thread):
         payload = index + begin + block
         self.socket.sendall(len_prefix + message_id + payload)
 
-    def send_cancel(self, piece_index: int, begin: int, length: int):
+    def send_cancel(self, piece_index: int, begin: int, length: int) -> None:
         ''' cancel msg '''
 
         logger.debug(f'{self.id}:send:cancel:{piece_index}')
@@ -198,7 +237,7 @@ class Peer(threading.Thread):
             (begin).to_bytes(4, 'big') + (length).to_bytes(4, 'big')
         self.socket.sendall(len_prefix + message_id + payload)
 
-    def send_port(self, port: int):
+    def send_port(self, port: int) -> None:
         ''' port msg '''
 
         logger.debug(f'{self.id}:send:port:{port}')
@@ -207,30 +246,46 @@ class Peer(threading.Thread):
         payload = port.to_bytes(2, 'big')
         self.socket.sendall(len_prefix + message_id + payload)
 
-    def send_extension_protocol_handshake(self):
-        ''' Extension Protocol handshake msg '''
+    def send_extended(self, extended_message_id: int, data: dict) -> None:
+        ''' Extension Protocol msg '''
 
-        logger.debug(f'{self.id}:send:Extension Protocol handshake')
+        assert extended_message_id >= 0
         message_id = (20).to_bytes(1, 'big')
-        extended_message_id = (0).to_bytes(
-            1, 'big')  # handshake extended message ID
-        data = {
-            'm': {
-                'ut_pex': 1
-            },
-            'v': 'pytorrent 0.1'
-        }
-        payload = extended_message_id + bencodepy.encode(data)
+        payload = extended_message_id.to_bytes(
+            1, 'big') + bencodepy.encode(data)
         len_prefix = (1+len(payload)).to_bytes(4, 'big')
         self.socket.sendall(len_prefix + message_id + payload)
 
-    def send_all_have_pieces(self):
+    def send_extension_protocol_handshake(self) -> None:
+        ''' Extension Protocol handshake msg '''
+
+        logger.debug(f'{self.id}:send:Extension Protocol handshake')
+        extended_message_id = 0  # handshake extended message ID
+        data = {
+            'm': {
+                'ut_pex': 1  # TODO: fix hardcoded id
+            },
+            'v': 'pytorrent 0.1'
+        }
+        self.send_extended(extended_message_id, data)
+
+    def send_pex(self) -> None:
+        ''' Peer Exchange msg '''
+
+        logger.debug(f'{self.id}:send:PEX')
+        extended_message_id = 1  # TODO: fix hardcoded id
+        data = {
+            # TODO
+        }
+        self.send_extended(extended_message_id, data)
+
+    def send_all_have_pieces(self) -> None:
         ''' send a have msg for each saved piece '''
 
         for piece_index in self.file_manager.downloaded_pieces:
             self.send_have(piece_index)
 
-    def receive_msg(self):
+    def receive_msg(self) -> None:
         ''' receive msg loop '''
 
         while not self.is_stopped():
@@ -239,6 +294,7 @@ class Peer(threading.Thread):
             except:
                 if not self.is_stopped():
                     logger.exception(f'{self.id}:error occured')
+                    self.stop_and_notify()
                 break
 
             len_prefix = int.from_bytes(data, 'big')
@@ -253,6 +309,7 @@ class Peer(threading.Thread):
             except:
                 if not self.is_stopped():
                     logger.exception(f'{self.id}:error occured')
+                    self.stop_and_notify()
                 break
 
             message_id = int.from_bytes(data[:1], 'big')
@@ -327,7 +384,7 @@ class Peer(threading.Thread):
                     f'{self.id}:recv:{Peer.MESSAGES[message_id]}:{piece_index}:{begin}:{len(block)}')
 
                 self.file_manager.add_block(piece_index, begin, block)
-                self.num_received += 1
+                self.update_stats(piece_index, len(block))
 
             elif message_id == 8:
                 # cancel msg
@@ -343,7 +400,7 @@ class Peer(threading.Thread):
 
             elif message_id == 20:
                 # extension protocol msg
-                # TODO
+
                 extended_message_id = int.from_bytes(data[1:2], 'big')
                 if extended_message_id == 0:
                     # handshake
@@ -351,13 +408,48 @@ class Peer(threading.Thread):
                     logger.debug(
                         f'{self.id}:recv:{Peer.MESSAGES[message_id]}:handshake:{handshake_data}')
                 else:
+                    extended_data = bencodepy.decode(data[2:])
                     logger.debug(
-                        f'{self.id}:recv:{Peer.MESSAGES[message_id]}:{bencodepy.decode(data[2:])}')
+                        f'{self.id}:recv:{Peer.MESSAGES[message_id]}:{extended_data}')
+                    # logger.info(
+                    #     f'{self.id}:PEX:{utils.unpack_peers(extended_data['added'])}')
+                    peers = []
+                    for ip, port in utils.unpack_peers(extended_data[b'added']):
+                        peers.append(Peer(ip, port, None, self.peer_manager,
+                                          self.file_manager, self.info_hash, self.client_id))
+                    self.peer_manager.update_peers(peers)
+                    # TODO: manage other fields
 
         logger.debug(f'{self.id}:receive_msg:close')
-        self.stop()
 
-    def next_piece_index(self):
+    def clean_queue(self) -> Tuple[int, int]:
+        ''' remove downloaded and timed-out pieces from queue '''
+
+        downloaded_count = 0
+        timedout_count = 0
+        # 30 s timeout
+        while not self.queue.is_empty():
+            if self.queue.first()[0] in self.file_manager.downloaded_pieces:
+                self.queue.pop()
+                downloaded_count += 1
+            elif time.time() - self.queue.first()[1] > 30:
+                piece_index, _ = self.queue.pop()
+                self.available_pieces.append(piece_index)
+                timedout_count += 1
+            else:
+                break
+
+        if downloaded_count > 0:
+            logger.debug(
+                f"{self.id}:{downloaded_count} downloaded pieces removed from queue")
+
+        if timedout_count > 0:
+            logger.debug(
+                f"{self.id}:{timedout_count} timed-out pieces removed from queue")
+
+        return downloaded_count, timedout_count
+
+    def next_piece_index(self) -> int | None:
         ''' return the next piece index to request '''
 
         while len(self.available_pieces) > self.idx_next_piece:
@@ -367,9 +459,10 @@ class Peer(threading.Thread):
                 return piece_index
         return None
 
-    def download_piece(self, piece_index: int):
+    def download_piece(self, piece_index: int) -> None:
         ''' request all blocks of a piece '''
 
+        self.queue.add((piece_index, time.time()))
         piece_length = self.file_manager.piece_length(piece_index)
         block_index = 0
         begin = 0
@@ -382,33 +475,50 @@ class Peer(threading.Thread):
 
             self._stop_event.wait(timeout=0.1)
 
-    def download(self):
+    def download(self) -> None:
         ''' download loop '''
 
+        self.start_time = time.time()
+        waiting_count = 0
         while not self.is_stopped():
             piece_index = self.next_piece_index()
             if piece_index is None:
                 self._stop_event.wait(timeout=1)
                 continue
 
-            if self.num_requests > self.num_received + 10:
-                # time.sleep(1)
-                # self._stop_event.wait(timeout=1)
-                self.num_requests = 0
-                self.num_received = 0
+            # TODO: manage queue length
+            while self.queue.len() >= self.queue_len and not self.is_stopped():
+                downloaded, timedout = self.clean_queue()
+                if downloaded + timedout == 0:
+                    waiting_count += 1
+                    logger.debug(
+                        f'{self.id}:download:waiting for requested pieces')
+                    self._stop_event.wait(timeout=2)
+                elif timedout > 0:
+                    self.queue_len = max(self.queue_len - 1, 2)
+                else:
+                    self.queue_len += int(1.5 * self.queue_len)
+                logger.debug(f'{self.id}:queue len:{self.queue_len}')
+                # self.request_pieces = 0
 
-            logger.info(f"{self.id}:dowload piece \'{piece_index}\'")
+            if self.is_stopped():
+                break
+
+            logger.debug(f"{self.id}:speed {self.speed}")
+            logger.debug(f"{self.id}:avg speed {self.avg_speed}")
+            logger.debug(f"{self.id}:waiting_count {waiting_count}")
+            logger.info(f"{self.id}:download {piece_index}")
             try:
                 self.download_piece(piece_index)
             except:
                 if not self.is_stopped():
                     logger.exception(f'{self.id}:error occured')
+                    self.stop_and_notify()
                 break
 
         logger.debug(f'{self.id}:download:close')
-        self.stop()
 
-    def stop(self):
+    def stop(self) -> None:
         if not self.is_stopped():
             logger.debug(f'{self.id}:stop received')
             self._stop_event.set()
@@ -422,11 +532,16 @@ class Peer(threading.Thread):
             except:
                 pass
 
-    def is_stopped(self):
+    def is_stopped(self) -> bool:
         return self._stop_event.is_set()
 
-    def run(self):
-        self._stop_event.clear()
+    def stop_and_notify(self) -> None:
+        if not self.is_stopped():
+            self.stop()
+            self.peer_manager.peer_stopped(self.peer_id)
+
+    def run(self) -> None:
+        self.init_vars()
 
         try:
             self.handshake_peer()
@@ -438,7 +553,7 @@ class Peer(threading.Thread):
         except:
             if not self.is_stopped():
                 logger.exception(f'{self.id}:error occured')
-            self.stop()
+                self.stop_and_notify()
             return
 
         t1 = threading.Thread(target=self.receive_msg)
@@ -462,15 +577,17 @@ class PeerManager:
         self.downloading = False
         self.max_active_peers: int = 50
 
-    def update_peers(self, peers: list[Peer]):
+    def update_peers(self, peers: list[Peer]) -> None:
         for p in peers:
             if p.id not in self.peers:
                 self.peers[p.id] = p
                 logger.info(f'new peer:{p.id}')
+                logger.info(f'active_peers:{self.active_peers}')
+                logger.info(f'self.downloading:{self.downloading}')
                 if self.downloading:
                     self.activate_peer_if_needed(p)
 
-    def activate_peer_if_needed(self, peer: Peer):
+    def activate_peer_if_needed(self, peer: Peer) -> bool:
         assert self.downloading
 
         if len(self.active_peers) < self.max_active_peers:
@@ -481,7 +598,7 @@ class PeerManager:
             return True
         return False
 
-    def download(self, max_active_peers: int = 50):
+    def download(self, max_active_peers: int = 50) -> None:
         assert not self.downloading
         self.max_active_peers = max_active_peers
         self.downloading = True
@@ -490,7 +607,12 @@ class PeerManager:
             if not self.activate_peer_if_needed(p):
                 break
 
-    def stop(self):
+    def peer_stopped(self, peer_id: str):
+        if peer_id in self.active_peers:
+            # self.peers[peer_id].join()  # TODO: join thread
+            self.active_peers.remove(peer_id)
+
+    def stop(self) -> None:
         logger.info('stop all peers')
 
         for peer_id in self.active_peers:

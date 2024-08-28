@@ -68,7 +68,7 @@ class Torrent:
 
         self.tracker_manager.query_trackers()
         time.sleep(1)
-        self.peer_manager.download(max_active_peers=20)
+        self.peer_manager.download(max_active_peers=50)
 
         try:
             while True:

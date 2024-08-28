@@ -5,6 +5,7 @@ import socket
 import threading
 import logging
 
+import utils
 from peer import Peer, PeerManager
 from filemanager import FileManager
 
@@ -31,14 +32,14 @@ class Tracker(threading.Thread):
 
         logger.info(self.tracker_url)
 
-    def scrape_tracker(self):
-        params = {
-            'info_hash': self.info_hash,
-        }
-        response = requests.get(
-            url='https://torrent.ubuntu.com/scrape', params=params)  # TODO: fix url
+    # def scrape_tracker(self):
+    #     params = {
+    #         'info_hash': self.info_hash,
+    #     }
+    #     response = requests.get(
+    #         url='https://torrent.ubuntu.com/scrape', params=params)  # TODO: fix url
 
-        # logger.debug(bencodepy.decode(response.content))
+    #     # logger.debug(bencodepy.decode(response.content))
 
     def send_request(self, params):
         if self.trackerid is not None:
@@ -82,13 +83,7 @@ class Tracker(threading.Thread):
             # binary model
             assert len(
                 response[b'peers']) % 6 == 0, 'malformed \'peers\' field of tracker response'
-            offset = 0
-            for _ in range(len(response[b'peers'])//6):
-                ip = struct.unpack_from("!i", response[b'peers'], offset)[0]
-                ip = socket.inet_ntoa(struct.pack("!i", ip))
-                offset += 4
-                port = struct.unpack_from("!H", response[b'peers'], offset)[0]
-                offset += 2
+            for ip, port in utils.unpack_peers(response[b'peers']):
                 self.peers.append(Peer(ip, port, None, self.peer_manager,
                                        self.file_manager, self.info_hash, self.peer_id))
 

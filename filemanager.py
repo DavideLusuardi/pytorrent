@@ -113,6 +113,8 @@ class FileManager:
 
         assert piece_index < self.num_pieces
         assert begin % self.block_length == 0
+        assert len(block) == min(self.block_length,
+                                 self.piece_length(piece_index) - begin)
 
         if not piece_index in self.incomplete_pieces:
             num_blocks = self.num_blocks_in_piece(piece_index)
