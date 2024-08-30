@@ -1,6 +1,9 @@
+
 # pytorrent
 
-A simple implementation of a torrent client in Python.
+Pytorrent is a command line tool written in Python that downloads files from the **BitTorrent** network.
+
+I made this program to learn how does BitTorrent protocol work.
 
 ## Useful Resources
 

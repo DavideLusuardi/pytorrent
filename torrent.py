@@ -1,9 +1,11 @@
+import argparse
 import bencodepy
 import hashlib
 import time
 import os
 import sys
 import logging
+import threading
 
 from tracker import Tracker, TrackerManager
 from peer import PeerManager
@@ -13,8 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class Torrent:
-    def __init__(self, torrent_file: str) -> None:
+    def __init__(self, torrent_file: str, download_dir: str) -> None:
         self.torrent_file: str = torrent_file
+        self.download_dir: str = download_dir
         logger.info(f"torrent file:{torrent_file}")
 
         self.peer_id: bytes = hashlib.sha1(
@@ -27,6 +30,8 @@ class Torrent:
         self.tracker_manager: TrackerManager = None
         self.peer_manager: PeerManager = None
         self.file_manager: FileManager = None
+
+        self._stop_event = threading.Event()
 
         self.read_torrent_file()
 
@@ -47,8 +52,8 @@ class Torrent:
             self.hashes.append(pieces[i*20:(i+1)*20])
         # logger.debug(self.hashes)
 
-        self.file_manager = FileManager(
-            self.metainfo[b'info'][b'name'].decode(), 'tmp', self.metainfo[b'info'][b'length'], self.metainfo[b'info'][b'piece length'], self.hashes)
+        self.file_manager = FileManager(self.metainfo[b'info'][b'name'].decode(), self.download_dir, self.metainfo[b'info'][b'length'],
+                                        self.metainfo[b'info'][b'piece length'], self.hashes, lambda: self._stop_event.set())
         self.peer_manager = PeerManager(self.file_manager)
 
         trackers = []
@@ -64,6 +69,10 @@ class Torrent:
         self.tracker_manager = TrackerManager(trackers, self.peer_manager)
 
     def download(self):
+        if len(self.file_manager.downloaded_pieces) == self.file_manager.num_pieces:
+            logger.info('file already downloaded')
+            return
+
         logger.info('starting download')
 
         self.tracker_manager.query_trackers()
@@ -71,9 +80,10 @@ class Torrent:
         self.peer_manager.download(max_active_peers=50)
 
         try:
-            while True:
-                time.sleep(10)
+            self._stop_event.wait()
         except KeyboardInterrupt:
+            pass
+        finally:
             self.tracker_manager.stop()
             self.peer_manager.stop()
 
@@ -86,7 +96,14 @@ class Torrent:
 
 
 def main():
-    logging.basicConfig(filename='tmp/torrent.log', level=logging.DEBUG)
+    parser = argparse.ArgumentParser(
+        prog='pytorrent',
+        description='Download files from the BitTorrent network.'
+    )
+    parser.add_argument('filename', help='torrent file')
+    args = parser.parse_args()
+
+    logging.basicConfig(filename='torrent.log', level=logging.DEBUG)
 
     root = logging.getLogger()
 
@@ -96,30 +113,8 @@ def main():
     # handler.setFormatter(formatter)
     root.addHandler(handler)
 
-    # torrent_file = os.path.join('torrent_files','torrent_file.torrent')
-    # torrent_file = os.path.join('torrent_files', 'ubuntu18.torrent')
-    torrent_file = os.path.join('torrent_files', 'LibreOffice.torrent')
-    # torrent_file = os.path.join('torrent_files', 'gimp.torrent')
-    # torrent_file = os.path.join('torrent_files', 'blender.torrent')
-    # torrent_file = os.path.join('torrent_files', 'blender_hybrid.torrent')
-    torrent = Torrent(torrent_file)
+    torrent = Torrent(args.filename, 'downloads')
     torrent.download()
-
-
-def test():
-    import math
-    from bitstring import BitArray
-
-    b = BitArray('0b00101011')
-    bitfield = b.tobytes()
-
-    binary_bitfield = BitArray(hex=bitfield.hex()).bin
-    available_pieces = []
-    for piece_index, b in enumerate(binary_bitfield):
-        if b == '1':
-            available_pieces.append(piece_index)
-    print("available pieces:")
-    print(available_pieces)
 
 
 if __name__ == '__main__':

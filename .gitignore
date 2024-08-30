@@ -1,3 +1,5 @@
 .vscode/
 tmp/
 __pycache__/
+downloads/
+*.log

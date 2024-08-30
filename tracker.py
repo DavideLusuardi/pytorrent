@@ -163,10 +163,14 @@ class TrackerManager:
 
     def query_trackers(self) -> None:
         # TODO: fix
-        self.trackers = [self.trackers[0]]
+        # self.trackers = [self.trackers[0]]
+        for t in self.trackers:
+            if t.tracker_url.split(':')[0] in ['http', 'https']:
+                t.start()
+                break
 
-        for tracker in self.trackers:
-            tracker.start()
+        # for tracker in self.trackers:
+        #     tracker.start()
 
     def stop(self):
         logger.info('stop all trackers')

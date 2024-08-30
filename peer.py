@@ -582,8 +582,8 @@ class PeerManager:
             if p.id not in self.peers:
                 self.peers[p.id] = p
                 logger.info(f'new peer:{p.id}')
-                logger.info(f'active_peers:{self.active_peers}')
-                logger.info(f'self.downloading:{self.downloading}')
+                # logger.info(f'active_peers:{self.active_peers}')
+                # logger.info(f'self.downloading:{self.downloading}')
                 if self.downloading:
                     self.activate_peer_if_needed(p)
 

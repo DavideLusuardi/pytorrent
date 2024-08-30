@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class FileManager:
-    def __init__(self, filename, directory, length, piece_len, hashes) -> None:
+    def __init__(self, filename, directory, length, piece_len, hashes, handle_finish) -> None:
         self.filename: str = filename
         self.base_directory: str = directory
         self.pieces_directory: str = os.path.join(
@@ -19,6 +19,7 @@ class FileManager:
         self.last_piece_len: int = length % piece_len  # [bytes]
         self.num_pieces: int = len(hashes)
         self.hashes: list[bytes] = hashes
+        self.handle_finish: function = handle_finish
 
         self.block_length: int = 2**14
         self.incomplete_pieces: dict[int, dict] = dict()
@@ -164,6 +165,7 @@ class FileManager:
                 size += len(piece)
             assert size == self.length
         logger.info(f'file saved:{self.filepath}')
+        self.handle_finish()
 
     def load_block(self, piece_index: int, begin: int, length: int) -> bytes:
         ''' return the specified block '''
