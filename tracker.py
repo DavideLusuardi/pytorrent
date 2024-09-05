@@ -4,6 +4,10 @@ import struct
 import socket
 import threading
 import logging
+from urllib.parse import urlparse, ParseResult
+import random
+import time
+from typing import Dict, Any
 
 import utils
 from peer import Peer, PeerManager
@@ -30,6 +34,14 @@ class Tracker(threading.Thread):
         self.incomplete: int = None
         self.peers: list[Peer] = []
 
+        self.url_parsed: ParseResult = urlparse(self.tracker_url)
+        assert self.url_parsed.scheme in [
+            'http', 'https', 'udp'], f'\'{self.url_parsed.scheme}\' protocol not supported'
+        self.address = (self.url_parsed.hostname, self.url_parsed.port)
+        if self.url_parsed.scheme == 'udp':
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.connection_id_timeout = 0
+
         logger.info(self.tracker_url)
 
     # def scrape_tracker(self):
@@ -41,14 +53,91 @@ class Tracker(threading.Thread):
 
     #     # logger.debug(bencodepy.decode(response.content))
 
-    def send_request(self, params):
+    # def udp_recv(self):
+    #     data, address = self.socket.recvfrom(1024)
+    #     print(address)  # TODO: assert address == tracker
+    #     assert len(data) >= 16  # Check whether the packet is at least 16 bytes
+
+    def connect_udp(self) -> None:
+        protocol_id = (0x41727101980).to_bytes(8, 'big')
+        action = (0).to_bytes(4, 'big')  # connect action
+        transaction_id = random.randint(0, 2**32-1).to_bytes(4, 'big')
+        payload = protocol_id + action + transaction_id
+
+        self.socket.sendto(payload, self.address)
+        data, address = self.socket.recvfrom(1024)
+        assert len(data) >= 16
+
+        r_action = data[:4]
+        r_transaction_id = data[4:8]
+        self.connection_id = data[8:16]
+        self.connection_id_timeout = time.time() + 60
+        assert action == r_action
+        assert transaction_id == r_transaction_id
+
+    def announce_udp(self, params: Dict[str, Any]) -> Dict[bytes, Any]:
+        assert self.connection_id_timeout > time.time()
+
+        action = (1).to_bytes(4, 'big')  # announce action
+        transaction_id = random.randint(0, 2**32-1).to_bytes(4, 'big')
+        event = (params['event'].encode('utf-8')
+                 if 'event' in params else (0).to_bytes(4, 'big'))
+        ip_address = (socket.inet_aton(params['ip'])
+                      if 'ip' in params else (0).to_bytes(4, 'big'))
+        key = (params['key'].to_bytes(4, 'big')
+               if 'key' in params else self.peer_id[:4])  # TODO: generate valid key
+        numwant = (params['numwant']
+                   if 'numwant' in params else -1).to_bytes(4, 'big')
+        port = params['port'].to_bytes(4, 'big')
+
+        payload = self.connection_id + action + transaction_id \
+            + params['info_hash'] + params['peer_id'] + params['downloaded'].to_bytes(8, 'big') \
+            + params['left'].to_bytes(8, 'big') + params['uploaded'].to_bytes(8, 'big') \
+            + event + ip_address + key + numwant + port
+
+        self.socket.sendto(payload, self.address)
+        data, address = self.socket.recvfrom(1024)
+        assert len(data) >= 20
+
+        r_action = data[:4]
+        assert r_action == action
+
+        r_transaction_id = data[4:8]
+        assert r_transaction_id == transaction_id
+
+        trail_bytes = (len(data) - 20) % 6  # invalid bytes in trail
+
+        response = {
+            b'interval': int.from_bytes(data[8:12], 'big'),
+            b'leechers': int.from_bytes(data[12:16], 'big'),
+            b'seeders': int.from_bytes(data[16:20], 'big'),
+            b'peers': data[20:len(data) - trail_bytes]
+        }
+        return response
+
+    def send_http(self, params: Dict[str, Any]) -> Dict[bytes, Any]:
+        response = requests.get(url=self.tracker_url, params=params)
+        assert response.ok, 'tracker response error'
+        return bencodepy.decode(response.content)
+
+    def send_udp(self, params: Dict[str, Any]) -> Dict[bytes, Any]:
+        if self.connection_id_timeout <= time.time():
+            self.connect_udp()
+        return self.announce_udp(params)
+
+    def send(self, params: Dict[str, Any]) -> bytes:
+        if self.url_parsed.scheme == 'udp':
+            response = self.send_udp(params)
+        else:
+            response = self.send_http(params)
+        return response
+
+    def send_request(self, params: Dict[str, Any]):
         if self.trackerid is not None:
             params['trackerid'] = self.trackerid
 
         logger.debug(f'{self.tracker_url}:request:{params}')
-        response = requests.get(url=self.tracker_url, params=params)
-        assert response.ok, 'tracker response error'
-        response = bencodepy.decode(response.content)
+        response = self.send(params)
         logger.debug(f'{self.tracker_url}:response:{response}')
 
         if b'trackerid' in response:
@@ -164,13 +253,14 @@ class TrackerManager:
     def query_trackers(self) -> None:
         # TODO: fix
         # self.trackers = [self.trackers[0]]
-        for t in self.trackers:
-            if t.tracker_url.split(':')[0] in ['http', 'https']:
-                t.start()
-                break
+        # for t in self.trackers:
+        #     if not t.tracker_url.split(':')[0] in ['http', 'https']:
+        #         t.start()
+        #         break
 
-        # for tracker in self.trackers:
-        #     tracker.start()
+        # self.trackers = [self.trackers[4]]
+        for tracker in self.trackers:
+            tracker.start()
 
     def stop(self):
         logger.info('stop all trackers')
