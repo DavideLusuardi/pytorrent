@@ -28,6 +28,9 @@ def unpack_peers(packed_peers: bytes) -> list[int, int]:
     return peers
 
 
+# TODO: add support for ipv6
+
+
 if __name__ == '__main__':
     peers = [('192.168.1.1', 8080)]
 

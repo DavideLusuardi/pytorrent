@@ -91,9 +91,16 @@ class Peer(threading.Thread):
             (piece_index, downloaded_bytes, time.time()))
 
     def receive_data(self, data_len: int) -> bytes:
-        data = self.socket.recv(data_len)
-        while len(data) < data_len:
-            data += self.socket.recv(data_len - len(data))
+        data = b''
+        while len(data) < data_len and not self.is_stopped():
+            try:
+                data += self.socket.recv(data_len - len(data))
+            except socket.timeout:
+                continue
+
+        if self.is_stopped():
+            raise ThreadStopped()
+
         assert len(data) == data_len
         return data
 
@@ -115,7 +122,7 @@ class Peer(threading.Thread):
         self.socket.settimeout(4)
         self.socket.connect((self.ip, self.port))
         logger.debug(f'{self.id}:connected to peer')
-        self.socket.settimeout(None)
+        self.socket.settimeout(1)
         self.socket.sendall(payload)
 
         p_pstrlen = int.from_bytes(self.receive_data(1), 'big')
@@ -466,57 +473,58 @@ class Peer(threading.Thread):
         piece_length = self.file_manager.piece_length(piece_index)
         block_index = 0
         begin = 0
-        while begin < piece_length and not self.is_stopped():
+        while begin < piece_length:
             block_length = min(
                 self.file_manager.block_length, piece_length - begin)
             self.send_request(piece_index, begin, block_length)
             block_index += 1
             begin += block_length
 
-            self._stop_event.wait(timeout=0.1)
+            self.wait(0.1)
 
     def download(self) -> None:
         ''' download loop '''
 
-        self.start_time = time.time()
-        waiting_count = 0
-        while not self.is_stopped():
-            piece_index = self.next_piece_index()
-            if piece_index is None:
-                self._stop_event.wait(timeout=1)
-                continue
+        try:
+            self.start_time = time.time()
+            waiting_count = 0
+            while not self.is_stopped():
+                piece_index = self.next_piece_index()
+                if piece_index is None:
+                    self.wait(1)
+                    continue
 
-            # TODO: manage queue length
-            while self.queue.len() >= self.queue_len and not self.is_stopped():
-                downloaded, timedout = self.clean_queue()
-                if downloaded + timedout == 0:
-                    waiting_count += 1
-                    logger.debug(
-                        f'{self.id}:download:waiting for requested pieces')
-                    self._stop_event.wait(timeout=2)
-                elif timedout > 0:
-                    self.queue_len = max(self.queue_len - 1, 2)
-                else:
-                    self.queue_len += int(1.5 * self.queue_len)
-                logger.debug(f'{self.id}:queue len:{self.queue_len}')
-                # self.request_pieces = 0
+                # TODO: manage queue length
+                while self.queue.len() >= self.queue_len:
+                    downloaded, timedout = self.clean_queue()
+                    if downloaded + timedout == 0:
+                        waiting_count += 1
+                        logger.debug(
+                            f'{self.id}:download:waiting for requested pieces')
+                        self.wait(2)
+                    elif timedout > 0:
+                        self.queue_len = max(self.queue_len - 1, 2)
+                    else:
+                        self.queue_len += int(1.5 * self.queue_len)
+                    logger.debug(f'{self.id}:queue len:{self.queue_len}')
+                    # self.request_pieces = 0
 
-            if self.is_stopped():
-                break
-
-            logger.debug(f"{self.id}:speed {self.speed}")
-            logger.debug(f"{self.id}:avg speed {self.avg_speed}")
-            logger.debug(f"{self.id}:waiting_count {waiting_count}")
-            logger.info(f"{self.id}:download {piece_index}")
-            try:
+                logger.debug(f"{self.id}:speed {self.speed}")
+                logger.debug(f"{self.id}:avg speed {self.avg_speed}")
+                logger.debug(f"{self.id}:waiting_count {waiting_count}")
+                logger.info(f"{self.id}:download {piece_index}")
                 self.download_piece(piece_index)
-            except:
-                if not self.is_stopped():
-                    logger.exception(f'{self.id}:error occured')
-                    self.stop_and_notify()
-                break
+        except:
+            if not self.is_stopped():
+                logger.exception(f'{self.id}:error occured')
+                self.stop_and_notify()
 
         logger.debug(f'{self.id}:download:close')
+
+    def wait(self, seconds: float):
+        self._stop_event.wait(timeout=seconds)
+        if self.is_stopped():
+            raise ThreadStopped()
 
     def stop(self) -> None:
         if not self.is_stopped():
@@ -621,10 +629,15 @@ class PeerManager:
 
         for peer_id in self.active_peers:
             p = self.peers[peer_id]
-            # p.join(timeout=1)
             p.join()
 
         self.active_peers = set()
         self.downloading = False
 
         logger.info('all peers closed')
+
+
+class ThreadStopped(Exception):
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)

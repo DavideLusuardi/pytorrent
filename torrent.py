@@ -2,7 +2,6 @@ import argparse
 import bencodepy
 import hashlib
 import time
-import os
 import sys
 import logging
 import threading
@@ -72,8 +71,6 @@ class Torrent:
         if len(self.file_manager.downloaded_pieces) == self.file_manager.num_pieces:
             logger.info('file already downloaded')
             return
-
-        logger.info('starting download')
 
         self.tracker_manager.query_trackers()
         time.sleep(1)
