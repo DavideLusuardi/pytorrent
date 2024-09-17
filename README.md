@@ -11,6 +11,7 @@ I made this program to learn how does BitTorrent protocol work.
 - [Extension Protocol (BEP 10)](http://bittorrent.org/beps/bep_0010.html)
 - [Peer Exchange (PEX) (BEP 11)](https://www.bittorrent.org/beps/bep_0011.html)
 - [UDP Tracker Protocol for BitTorrent (BEP 15)](https://www.bittorrent.org/beps/bep_0015.html)
+- [Distributed hash table](https://web.archive.org/web/20230307170833/https://wiki.vuze.com/w/Distributed_hash_table)
 
 ## Useful Resources
 

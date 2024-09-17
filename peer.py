@@ -11,6 +11,7 @@ from typing import Tuple
 from queueLL import Queue
 import utils
 from filemanager import FileManager
+from dhtNode import DHTNode
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +32,19 @@ class Peer(threading.Thread):
         20: 'extension protocol'
     }
 
-    def __init__(self, ip, port, peer_id, peer_manager, file_manager, info_hash, client_id) -> None:
+    # TODO: accept hostname instead of ip
+    def __init__(self, ip: str, port: int, peer_id: bytes, info_hash: bytes, client_id: bytes, peer_manager, file_manager: FileManager, dht: DHTNode) -> None:
         threading.Thread.__init__(self)
 
         self.ip: str = ip
         self.port: int = port
         self.peer_id: bytes = peer_id
         self.id: str = f"{ip}:{port}"
-        self.peer_manager: PeerManager = peer_manager
-        self.file_manager: FileManager = file_manager
         self.info_hash: bytes = info_hash
         self.client_id: bytes = client_id
+        self.peer_manager: PeerManager = peer_manager
+        self.file_manager: FileManager = file_manager
+        self.dht: DHTNode = dht
 
         self.init_vars()
 
@@ -50,6 +53,8 @@ class Peer(threading.Thread):
         self.am_interested = False
         self.peer_choking = True
         self.peer_interested = False
+
+        self.peer_reserved: bytes = b'\x00'*8
 
         self.socket: socket.socket = None
         self.available_pieces: list[int] = []
@@ -86,6 +91,12 @@ class Peer(threading.Thread):
 
         return len(self.downloaded_blocks)*self.file_manager.block_length / (time.time()-self.start_time)
 
+    def is_extension_protocol_supported(self):
+        return (self.peer_reserved[5] & 16) == 16
+
+    def is_dht_supported(self):
+        return (self.peer_reserved[7] & 1) == 1
+
     def update_stats(self, piece_index: int, downloaded_bytes: int):
         self.downloaded_blocks.append(
             (piece_index, downloaded_bytes, time.time()))
@@ -109,9 +120,18 @@ class Peer(threading.Thread):
 
         pstr = b'BitTorrent protocol'
         pstrlen = len(pstr).to_bytes(1, 'big')
-        # reserved = b'\x00' * 8
-        reserved = b'\x00' * 5 + b'\x10' + b'\x00' * 2  # support for Extension Protocol
+        reserved = b''.join([
+            b'\x00',
+            b'\x00',
+            b'\x00',
+            b'\x00',
+            b'\x00',
+            b'\x10',  # Extension Protocol support
+            b'\x00',
+            b'\x01',  # DHT support
+        ])
         logger.debug(f'{self.id}:enable support for Extension Protocol')
+        logger.debug(f'{self.id}:enable support for DHT')
 
         payload = pstrlen + pstr + reserved + self.info_hash + self.client_id
 
@@ -131,7 +151,7 @@ class Peer(threading.Thread):
         # logger.debug(f'{self.id}:handshake recv:{data}')
 
         p_pstr = data[:p_pstrlen]
-        p_reserved = data[p_pstrlen: p_pstrlen+8]
+        self.peer_reserved = data[p_pstrlen: p_pstrlen+8]
         p_info_hash = data[p_pstrlen+8: p_pstrlen+8+20]
         p_peer_id = data[p_pstrlen+8+20: p_pstrlen+8+20+20]
         assert len(p_peer_id) == 20
@@ -142,7 +162,7 @@ class Peer(threading.Thread):
 
         logger.debug(f'{self.id}:handshake recv:pstrlen:{p_pstrlen}')
         logger.debug(f'{self.id}:handshake recv:pstr:{p_pstr}')
-        logger.debug(f'{self.id}:handshake recv:reserved:{p_reserved}')
+        logger.debug(f'{self.id}:handshake recv:reserved:{self.peer_reserved}')
         logger.debug(f'{self.id}:handshake recv:info_hash:{p_info_hash}')
         logger.debug(f'{self.id}:handshake recv:peer_id:{p_peer_id}')
 
@@ -299,8 +319,10 @@ class Peer(threading.Thread):
             try:
                 data = self.receive_data(4)
             except:
+                import traceback
                 if not self.is_stopped():
                     logger.exception(f'{self.id}:error occured')
+                    logger.debug(traceback.format_exc())
                     self.stop_and_notify()
                 break
 
@@ -314,8 +336,10 @@ class Peer(threading.Thread):
             try:
                 data = self.receive_data(len_prefix)
             except:
+                import traceback
                 if not self.is_stopped():
                     logger.exception(f'{self.id}:error occured')
+                    logger.debug(traceback.format_exc())
                     self.stop_and_notify()
                 break
 
@@ -401,7 +425,8 @@ class Peer(threading.Thread):
 
             elif message_id == 9:
                 # port msg
-                # TODO
+                port = int.from_bytes(data[1:3], 'big')
+                self.dht.check_and_add(self.ip, port)
                 logger.debug(
                     f'{self.id}:recv:{Peer.MESSAGES[message_id]}')
 
@@ -420,12 +445,10 @@ class Peer(threading.Thread):
                         f'{self.id}:recv:{Peer.MESSAGES[message_id]}:{extended_data}')
                     # logger.info(
                     #     f'{self.id}:PEX:{utils.unpack_peers(extended_data['added'])}')
-                    peers = []
-                    for ip, port in utils.unpack_peers(extended_data[b'added']):
-                        peers.append(Peer(ip, port, None, self.peer_manager,
-                                          self.file_manager, self.info_hash, self.client_id))
-                    self.peer_manager.update_peers(peers)
-                    # TODO: manage other fields
+                    if b'added' in extended_data:
+                        peers = utils.unpack_peers(extended_data[b'added'])
+                        self.peer_manager.add_peers_by_ip(peers)
+                        # TODO: manage other fields
 
         logger.debug(f'{self.id}:receive_msg:close')
 
@@ -480,7 +503,7 @@ class Peer(threading.Thread):
             block_index += 1
             begin += block_length
 
-            self.wait(0.1)
+            self.wait(0.02)
 
     def download(self) -> None:
         ''' download loop '''
@@ -515,8 +538,10 @@ class Peer(threading.Thread):
                 logger.info(f"{self.id}:download {piece_index}")
                 self.download_piece(piece_index)
         except:
+            import traceback
             if not self.is_stopped():
                 logger.exception(f'{self.id}:error occured')
+                logger.debug(traceback.format_exc())
                 self.stop_and_notify()
 
         logger.debug(f'{self.id}:download:close')
@@ -553,14 +578,19 @@ class Peer(threading.Thread):
 
         try:
             self.handshake_peer()
-            self.send_extension_protocol_handshake()
+            if self.is_extension_protocol_supported():
+                self.send_extension_protocol_handshake()
+            if self.is_dht_supported():
+                self.send_port(self.port)  # TODO
             self.send_bitfield()
             self.send_unchoke()
             self.send_interested()
             # self.send_all_have_pieces()
         except:
+            import traceback
             if not self.is_stopped():
-                logger.exception(f'{self.id}:error occured')
+                logger.debug(f'{self.id}:error occured')
+                logger.debug(traceback.format_exc())
                 self.stop_and_notify()
             return
 
@@ -576,8 +606,9 @@ class Peer(threading.Thread):
 
 
 class PeerManager:
-    def __init__(self, file_manager: FileManager) -> None:
-        self.file_manager: FileManager = file_manager
+    def __init__(self, torrent) -> None:
+        # self.file_manager: FileManager = file_manager
+        self.torrent = torrent
 
         self.peers: dict[str, Peer] = {}
         self.active_peers: set[Peer] = set()
@@ -585,7 +616,7 @@ class PeerManager:
         self.downloading = False
         self.max_active_peers: int = 50
 
-    def update_peers(self, peers: list[Peer]) -> None:
+    def add_peers(self, peers: list[Peer]) -> None:
         for p in peers:
             if p.id not in self.peers:
                 self.peers[p.id] = p
@@ -594,6 +625,14 @@ class PeerManager:
                 # logger.info(f'self.downloading:{self.downloading}')
                 if self.downloading:
                     self.activate_peer_if_needed(p)
+
+    def add_peers_by_ip(self, peers: list[str, int]):
+        pp = []
+        for ip, port in peers:
+            peer = Peer(ip, port, None, self.torrent.info_hash, self.torrent.peer_id,
+                        self, self.torrent.file_manager, self.torrent.dht)
+            pp.append(peer)
+        self.add_peers(pp)
 
     def activate_peer_if_needed(self, peer: Peer) -> bool:
         assert self.downloading

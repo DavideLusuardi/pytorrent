@@ -9,6 +9,7 @@ import threading
 from tracker import Tracker, TrackerManager
 from peer import PeerManager
 from filemanager import FileManager
+from dhtNode import DHTNode
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class Torrent:
         self.tracker_manager: TrackerManager = None
         self.peer_manager: PeerManager = None
         self.file_manager: FileManager = None
+        self.dht: DHTNode = None
 
         self._stop_event = threading.Event()
 
@@ -37,7 +39,6 @@ class Torrent:
     def read_torrent_file(self):
         with open(self.torrent_file, 'rb') as f:
             self.metainfo = bencodepy.decode(f.read())
-            # logger.debug(self.metainfo)
 
         self.info_hash = hashlib.sha1(
             bencodepy.encode(self.metainfo[b'info'])).digest()
@@ -53,17 +54,23 @@ class Torrent:
 
         self.file_manager = FileManager(self.metainfo[b'info'][b'name'].decode(), self.download_dir, self.metainfo[b'info'][b'length'],
                                         self.metainfo[b'info'][b'piece length'], self.hashes, lambda: self._stop_event.set())
-        self.peer_manager = PeerManager(self.file_manager)
+        self.peer_manager = PeerManager(self)
+        self.dht = DHTNode(self.info_hash, self.peer_manager.add_peers_by_ip)
 
         trackers = []
         if b'announce-list' in self.metainfo:
             for tracker_url in self.metainfo[b'announce-list']:
                 trackers.append(
-                    Tracker(tracker_url[0].decode(), self.peer_manager, self.file_manager, self.info_hash, self.peer_id))
-        else:
+                    Tracker(tracker_url[0].decode(), self.peer_manager, self.file_manager, self.dht, self.info_hash, self.peer_id))
+        elif b'announce' in self.metainfo:
             tracker_url = self.metainfo[b'announce'].decode()
             trackers.append(
-                Tracker(tracker_url, self.peer_manager, self.file_manager, self.info_hash, self.peer_id))
+                Tracker(tracker_url, self.peer_manager, self.file_manager, self.dht, self.info_hash, self.peer_id))
+        elif b'nodes' in self.metainfo:
+            for host, port in self.metainfo[b'nodes']:
+                self.dht.check_and_add(host, port)
+        else:
+            raise Exception('torrent file not supported')
 
         self.tracker_manager = TrackerManager(trackers, self.peer_manager)
 
@@ -74,7 +81,7 @@ class Torrent:
 
         self.tracker_manager.query_trackers()
         time.sleep(1)
-        self.peer_manager.download(max_active_peers=50)
+        self.peer_manager.download(max_active_peers=100)
 
         try:
             self._stop_event.wait()
@@ -83,6 +90,7 @@ class Torrent:
         finally:
             self.tracker_manager.stop()
             self.peer_manager.stop()
+            self.dht.stop()
 
     def __str__(self):
         return '\n'.join(

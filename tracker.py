@@ -12,20 +12,24 @@ from typing import Dict, Any
 import utils
 from peer import Peer, PeerManager
 from filemanager import FileManager
+from dhtNode import DHTNode
 
 logger = logging.getLogger(__name__)
+
+# TODO: socket timeout
 
 
 class Tracker(threading.Thread):
     port = 6881  # TODO: select port
 
-    def __init__(self, tracker_url, peer_manager, file_manager, info_hash, peer_id) -> None:
+    def __init__(self, tracker_url, peer_manager, file_manager, dht, info_hash, peer_id) -> None:
         threading.Thread.__init__(self)
         self._stop_event = threading.Event()
 
         self.tracker_url: str = tracker_url
         self.peer_manager: PeerManager = peer_manager
         self.file_manager: FileManager = file_manager
+        self.dht: DHTNode = dht
         self.info_hash: bytes = info_hash
         self.peer_id: bytes = peer_id
         self.trackerid: bytes = None
@@ -40,6 +44,8 @@ class Tracker(threading.Thread):
         self.address = (self.url_parsed.hostname, self.url_parsed.port)
         if self.url_parsed.scheme == 'udp':
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.setblocking(1)
+            # self.socket.settimeout(4)  # TODO
             self.connection_id_timeout = 0
 
         logger.info(self.tracker_url)
@@ -65,7 +71,7 @@ class Tracker(threading.Thread):
         payload = protocol_id + action + transaction_id
 
         self.socket.sendto(payload, self.address)
-        data, address = self.socket.recvfrom(1024)
+        data, address = self.socket.recvfrom(1024)  # TODO: check address
         assert len(data) >= 16
 
         r_action = data[:4]
@@ -96,7 +102,7 @@ class Tracker(threading.Thread):
             + event + ip_address + key + numwant + port
 
         self.socket.sendto(payload, self.address)
-        data, address = self.socket.recvfrom(1024)
+        data, address = self.socket.recvfrom(1024)  # TODO: check address
         assert len(data) >= 20
 
         r_action = data[:4]
@@ -166,15 +172,15 @@ class Tracker(threading.Thread):
                 peer_id = p[b'peer_id']
                 ip = socket.inet_ntoa(struct.pack("!i", p[b'ip']))
                 port = p[b'port']
-                self.peers.append(Peer(ip, port, peer_id, self.peer_manager,
-                                       self.file_manager, self.info_hash, self.peer_id))
+                self.peers.append(Peer(ip, port, peer_id, self.info_hash,
+                                  self.peer_id, self.peer_manager, self.file_manager, self.dht))
         else:
             # binary model
             assert len(
                 response[b'peers']) % 6 == 0, 'malformed \'peers\' field of tracker response'
             for ip, port in utils.unpack_peers(response[b'peers']):
-                self.peers.append(Peer(ip, port, None, self.peer_manager,
-                                       self.file_manager, self.info_hash, self.peer_id))
+                self.peers.append(Peer(ip, port, None, self.info_hash,
+                                  self.peer_id, self.peer_manager, self.file_manager, self.dht))
 
         for p in self.peers:
             logger.info(f'{self.tracker_url}:peer:{p}')
@@ -201,7 +207,7 @@ class Tracker(threading.Thread):
 
         logger.debug(f'{self.tracker_url}:first request')
         peers = self.send_request(params)
-        self.peer_manager.update_peers(peers)
+        self.peer_manager.add_peers(peers)
 
     def update(self):
         ''' regular update '''
@@ -225,7 +231,7 @@ class Tracker(threading.Thread):
 
             logger.debug(f'{self.tracker_url}:update')
             peers = self.send_request(params)
-            self.peer_manager.update_peers(peers)
+            self.peer_manager.add_peers(peers)
 
             self._stop_event.wait(timeout=self.interval)
 
